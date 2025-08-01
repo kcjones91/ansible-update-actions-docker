@@ -1,0 +1,147 @@
+---
+- name: Stop and Remove Fedora Docker Container
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars:
+    # Default values - can be overridden with --extra-vars
+    container_name: "fedora-target"
+    force_remove: false
+    remove_image: false
+    fedora_image: "fedora:latest"
+    
+  tasks:
+    - name: Check if Docker is running
+      shell: docker info
+      register: docker_status
+      failed_when: false
+      changed_when: false
+      
+    - name: Fail if Docker is not running
+      fail:
+        msg: "Docker is not running or not accessible. Please start Docker Desktop."
+      when: docker_status.rc != 0
+      
+    - name: Check if container exists
+      shell: docker ps -a --filter "name={{ container_name }}" --format "{{ '{{.Names}} - {{.Status}}' }}"
+      register: container_check
+      changed_when: false
+      
+    - name: Display container status
+      debug:
+        msg: "Found container: {{ container_check.stdout }}"
+      when: container_check.stdout != ""
+      
+    - name: No container found message
+      debug:
+        msg: "No container named '{{ container_name }}' found"
+      when: container_check.stdout == ""
+      
+    - name: Container operations
+      block:
+        - name: Check if container is running
+          shell: docker ps --filter "name={{ container_name }}" --format "{{ '{{.Names}}' }}"
+          register: running_container
+          changed_when: false
+          
+        - name: Stop running container
+          shell: docker stop {{ container_name }}
+          register: stop_result
+          when: running_container.stdout == container_name
+          
+        - name: Display stop results
+          debug:
+            msg: "Container {{ container_name }} stopped successfully"
+          when: running_container.stdout == container_name and stop_result is succeeded
+          
+        - name: Container not running message
+          debug:
+            msg: "Container {{ container_name }} was not running"
+          when: running_container.stdout != container_name
+          
+        - name: Remove container (normal)
+          shell: docker rm {{ container_name }}
+          register: remove_result
+          when: not (force_remove | bool)
+          ignore_errors: yes
+          
+        - name: Force remove container
+          shell: docker rm -f {{ container_name }}
+          register: force_remove_result
+          when: force_remove | bool
+          ignore_errors: yes
+          
+        - name: Display removal results
+          debug:
+            msg: |
+              Container {{ container_name }} removed successfully
+              {% if force_remove | bool %}(forced removal){% endif %}
+          when: (remove_result is defined and remove_result is succeeded) or (force_remove_result is defined and force_remove_result is succeeded)
+          
+        - name: Display removal failure
+          debug:
+            msg: "Failed to remove container {{ container_name }}. It may not exist or be in use."
+          when: 
+            - (remove_result is defined and remove_result is failed) or (force_remove_result is defined and force_remove_result is failed)
+            
+      when: container_check.stdout != ""
+      
+    - name: Optional image removal
+      block:
+        - name: Check if Fedora image exists
+          shell: docker images {{ fedora_image }} --format "{{ '{{.Repository}}:{{.Tag}}' }}"
+          register: image_check
+          changed_when: false
+          
+        - name: Remove Fedora image
+          shell: docker rmi {{ fedora_image }}
+          register: image_removal
+          when: image_check.stdout != ""
+          ignore_errors: yes
+          
+        - name: Display image removal results
+          debug:
+            msg: "Fedora image {{ fedora_image }} removed successfully"
+          when: image_check.stdout != "" and image_removal is succeeded
+          
+        - name: Image removal failed
+          debug:
+            msg: "Failed to remove image {{ fedora_image }}. It may be in use by other containers."
+          when: image_check.stdout != "" and image_removal is failed
+          
+        - name: No image found
+          debug:
+            msg: "No Fedora image {{ fedora_image }} found to remove"
+          when: image_check.stdout == ""
+          
+      when: remove_image | bool
+      
+    - name: Clean up unused Docker resources
+      shell: docker system prune -f
+      register: cleanup_result
+      when: force_remove | bool
+      
+    - name: Display cleanup results
+      debug:
+        msg: "Docker system cleanup completed: {{ cleanup_result.stdout }}"
+      when: force_remove | bool and cleanup_result is defined
+      
+    - name: Final status check
+      shell: docker ps -a --filter "name={{ container_name }}" --format "{{ '{{.Names}}' }}"
+      register: final_check
+      changed_when: false
+      
+    - name: Display final status
+      debug:
+        msg: |
+          =================================
+          Container Cleanup Summary:
+          =================================
+          Container {{ container_name }}: {{ 'REMOVED' if final_check.stdout == '' else 'STILL EXISTS' }}
+          {% if remove_image | bool %}
+          Image removal: {{ 'ATTEMPTED' }}
+          {% endif %}
+          {% if force_remove | bool %}
+          System cleanup: PERFORMED
+          {% endif %}
+          =================================

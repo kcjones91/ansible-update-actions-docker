@@ -1,0 +1,183 @@
+---
+- name: Update Flow using Ansible Playbook
+  hosts: fedora_servers
+  gather_facts: yes
+  vars:
+    # Default values - can be overridden with --extra-vars
+    action: "check"  # Options: check, security, full, rollback
+    rollback_to: ""  # Transaction ID to rollback to
+    reboot_after: false
+    
+  tasks:
+    - name: Display current action
+      debug:
+        msg: "Performing action: {{ action }}"
+    
+    # BLOCK 1: CHECK UPDATES
+    - name: Check for available updates
+      block:
+        - name: Check for available package updates
+          dnf:
+            list: updates
+          register: available_updates
+          
+        - name: Display available updates count
+          debug:
+            msg: "{{ available_updates.results | length }} packages available for update"
+            
+        - name: Show first 10 available updates
+          debug:
+            msg: "Available updates: {{ available_updates.results[:10] | map(attribute='name') | list }}"
+          when: available_updates.results | length > 0
+          
+        - name: No updates message
+          debug:
+            msg: "System is up to date!"
+          when: available_updates.results | length == 0
+          
+        - name: Check for security updates specifically
+          shell: dnf --security check-update
+          register: security_check
+          failed_when: false
+          changed_when: false
+          
+        - name: Display security update status
+          debug:
+            msg: "Security updates available: {{ 'Yes' if security_check.rc == 100 else 'No' }}"
+            
+      when: action == "check"
+    
+    # BLOCK 2: SECURITY UPDATES ONLY  
+    - name: Apply security updates only
+      block:
+        - name: Create system snapshot before security updates
+          shell: |
+            dnf history list | head -2 | tail -1 | awk '{print $1}'
+          register: pre_security_snapshot
+          
+        - name: Display snapshot info
+          debug:
+            msg: "Current transaction ID before security updates: {{ pre_security_snapshot.stdout }}"
+            
+        - name: Apply security updates
+          dnf:
+            name: "*"
+            state: latest
+            security: yes
+          register: security_updates
+          
+        - name: Display security update results
+          debug:
+            msg: "Security updates completed. {{ security_updates.results | length }} packages updated"
+          when: security_updates.changed
+          
+        - name: No security updates needed
+          debug:
+            msg: "No security updates were needed"
+          when: not security_updates.changed
+          
+        - name: Reboot if requested and updates were applied
+          reboot:
+            reboot_timeout: 300
+          when: reboot_after | bool and security_updates.changed
+          
+      when: action == "security"
+    
+    # BLOCK 3: FULL SYSTEM UPDATE
+    - name: Perform full system update
+      block:
+        - name: Create system snapshot before full update
+          shell: |
+            dnf history list | head -2 | tail -1 | awk '{print $1}'
+          register: pre_update_snapshot
+          
+        - name: Display current transaction ID
+          debug:
+            msg: "Current transaction ID before updates: {{ pre_update_snapshot.stdout }}"
+            
+        - name: Update all packages
+          dnf:
+            name: "*"
+            state: latest
+          register: full_updates
+          
+        - name: Install additional useful packages
+          dnf:
+            name:
+              - vim
+              - curl
+              - wget
+              - htop
+              - git
+            state: present
+          register: additional_packages
+          
+        - name: Display update results
+          debug:
+            msg: |
+              Full update completed:
+              - System packages updated: {{ full_updates.changed }}
+              - Additional packages installed: {{ additional_packages.changed }}
+              - Pre-update transaction ID: {{ pre_update_snapshot.stdout }}
+              
+        - name: Get post-update transaction ID
+          shell: |
+            dnf history list | head -2 | tail -1 | awk '{print $1}'
+          register: post_update_snapshot
+          
+        - name: Display post-update transaction ID
+          debug:
+            msg: "Post-update transaction ID: {{ post_update_snapshot.stdout }}"
+            
+        - name: Reboot if requested and updates were applied
+          reboot:
+            reboot_timeout: 300
+          when: reboot_after | bool and (full_updates.changed or additional_packages.changed)
+          
+      when: action == "full"
+    
+    # BLOCK 4: ROLLBACK SYSTEM
+    - name: Rollback system updates
+      block:
+        - name: Validate rollback_to parameter
+          fail:
+            msg: "rollback_to parameter is required for rollback action. Use --extra-vars 'rollback_to=TRANSACTION_ID'"
+          when: rollback_to == ""
+          
+        - name: Display rollback information
+          debug:
+            msg: "Attempting to rollback to transaction ID: {{ rollback_to }}"
+            
+        - name: Show current DNF history
+          shell: dnf history list --reverse | head -10
+          register: current_history
+          
+        - name: Display recent transaction history
+          debug:
+            msg: "Recent transactions:\n{{ current_history.stdout }}"
+            
+        - name: Perform rollback
+          shell: dnf history undo {{ rollback_to }} -y
+          register: rollback_result
+          
+        - name: Display rollback results
+          debug:
+            msg: "Rollback completed: {{ rollback_result.stdout }}"
+            
+        - name: Reboot after rollback if requested
+          reboot:
+            reboot_timeout: 300
+          when: reboot_after | bool
+          
+      when: action == "rollback"
+    
+    # FINAL TASK: System information
+    - name: Display final system information
+      debug:
+        msg: |
+          System Information:
+          - Hostname: {{ ansible_hostname }}
+          - OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+          - Kernel: {{ ansible_kernel }}
+          - Architecture: {{ ansible_architecture }}
+          - Action performed: {{ action }}

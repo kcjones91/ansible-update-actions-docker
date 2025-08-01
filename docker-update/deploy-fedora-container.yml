@@ -1,0 +1,120 @@
+---
+- name: Launch Fedora Docker Container for Ansible Testing
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars:
+    # Default values - can be overridden with --extra-vars
+    container_name: "fedora-target"
+    container_port: "22"  # SSH runs on port 22 inside container
+    host_port: "2222"     # External port to access SSH
+    root_password: "password"
+    fedora_image: "fedora:latest"
+    
+  tasks:
+    - name: Check if Docker is running
+      shell: docker info
+      register: docker_status
+      failed_when: false
+      changed_when: false
+      
+    - name: Fail if Docker is not running
+      fail:
+        msg: "Docker is not running or not accessible. Please start Docker Desktop."
+      when: docker_status.rc != 0
+      
+    - name: Check if container already exists
+      shell: docker ps -a --filter "name={{ container_name }}" --format "{{ '{{.Names}}' }}"
+      register: existing_container
+      changed_when: false
+      
+    - name: Stop existing container if running
+      shell: docker stop {{ container_name }}
+      when: existing_container.stdout == container_name
+      ignore_errors: yes
+      
+    - name: Remove existing container
+      shell: docker rm {{ container_name }}
+      when: existing_container.stdout == container_name
+      ignore_errors: yes
+      
+    - name: Pull latest Fedora image
+      shell: docker pull {{ fedora_image }}
+      register: pull_result
+      
+    - name: Display pull results
+      debug:
+        msg: "Fedora image pull completed"
+      when: pull_result.changed
+      
+    - name: Launch Fedora container with SSH
+      shell: |
+        docker run -d --name {{ container_name }} \
+          --privileged \
+          -p {{ host_port }}:{{ container_port }} \
+          {{ fedora_image }} \
+          /bin/bash -c "
+            dnf update -y && 
+            dnf install -y openssh-server python3 && 
+            ssh-keygen -A && 
+            echo 'root:{{ root_password }}' | chpasswd && 
+            sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && 
+            /usr/sbin/sshd -D
+          "
+      register: container_launch
+      
+    - name: Display container launch status
+      debug:
+        msg: "Container {{ container_name }} launched successfully with ID: {{ container_launch.stdout }}"
+      when: container_launch.rc == 0
+      
+    - name: Wait for SSH service to be ready
+      wait_for:
+        host: localhost
+        port: "{{ host_port }}"
+        delay: 10
+        timeout: 120
+        msg: "SSH service did not start within 120 seconds"
+        
+    - name: Verify container is running
+      shell: docker ps --filter "name={{ container_name }}" --format "{{ '{{.Names}} - {{.Status}}' }}"
+      register: container_status
+      changed_when: false
+      
+    - name: Display container status
+      debug:
+        msg: "Container Status: {{ container_status.stdout }}"
+        
+    - name: Test SSH connectivity
+      shell: ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p {{ host_port }} root@localhost "echo 'SSH connection successful'"
+      register: ssh_test
+      failed_when: false
+      
+    - name: Display SSH test results
+      debug:
+        msg: |
+          SSH Test: {{ 'PASSED' if ssh_test.rc == 0 else 'FAILED' }}
+          {% if ssh_test.rc == 0 %}
+          Container is ready for Ansible playbooks!
+          {% else %}
+          SSH may still be initializing. Wait a moment and try again.
+          {% endif %}
+          
+    - name: Display connection information
+      debug:
+        msg: |
+          =================================
+          Container Launch Summary:
+          =================================
+          Container Name: {{ container_name }}
+          SSH Port: {{ host_port }}
+          Root Password: {{ root_password }}
+          
+          Test connection with:
+          ssh -p {{ host_port }} root@localhost
+          (password: {{ root_password }})
+          
+          Run Ansible playbooks with inventory:
+          [fedora_servers]
+          {{ container_name }} ansible_host=localhost ansible_port={{ host_port }} ansible_user=root ansible_ssh_pass={{ root_password }}
+          =================================
